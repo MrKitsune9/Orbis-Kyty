@@ -110,6 +110,7 @@ target_include_directories(kyty_3rd PRIVATE
 enable_language(ASM)
 add_executable(kyty-ps4
 	"${ORBIS_SHIM}/main/main_orbis.cpp"
+	"${ORBIS_SHIM}/ui/kyty_ui.cpp"
 	"${ORBIS_SHIM}/stubs/stub_trap.cpp"
 	"${ORBIS_SHIM}/stubs/unported_stubs.S"
 	"${ORBIS_SHIM}/stubs/compat_orbis.cpp")
@@ -120,6 +121,7 @@ if(KYTY_EDEN_FRONTEND)
 	target_sources(kyty-ps4 PRIVATE "${KYTY_EDEN_FRONTEND}/libc_wide_fixes.cpp"
 		"${KYTY_EDEN_FRONTEND}/emutls/emutls.c")
 endif()
+target_include_directories(kyty-ps4 PRIVATE "${ORBIS_SHIM}/ui" "${ORBIS_SHIM}")
 target_link_libraries(kyty-ps4 PRIVATE kyty_core kyty_3rd
-	-lSceAudioOut -lScePad -lSceUserService -lSceSystemService -lSceSysmodule -lSceNet)
+	-lSceVideoOut -lSceAudioOut -lScePad -lSceUserService -lSceSystemService -lSceSysmodule -lSceNet)
 set_target_properties(kyty-ps4 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

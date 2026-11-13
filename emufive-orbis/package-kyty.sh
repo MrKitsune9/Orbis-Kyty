@@ -25,13 +25,17 @@ OUT="$ROOT/out-kyty"
 
 [ -f "$ELF" ] || { echo "faltou o ELF: $ELF"; exit 1; }
 rm -rf "$ST"; mkdir -p "$ST/sce_sys/about" "$ST/sce_module" "$OUT"
-cp "$EDEN/assets/icon0.png" "$ST/sce_sys/icon0.png"          # 512x512
+# Icone (512x512) e fundo (1920x1080) do Orbis-Kyty: emufive-orbis/assets/. Sem eles, usa o icone do Eden.
+ASSETS="$ROOT/emufive-orbis/assets"; [ -f "$ASSETS/icon0.png" ] || ASSETS="$ROOT/assets"
+if [ -f "$ASSETS/icon0.png" ]; then cp "$ASSETS/icon0.png" "$ST/sce_sys/icon0.png"; else cp "$EDEN/assets/icon0.png" "$ST/sce_sys/icon0.png"; fi
+HAVE_PIC1=0; [ -f "$ASSETS/pic1.png" ] && { cp "$ASSETS/pic1.png" "$ST/sce_sys/pic1.png"; HAVE_PIC1=1; }
 "$BIN/create-fself.exe" -in="$(cygpath -m "$ELF")" -out="$(cygpath -m "$ST/x.oelf")" \
-    --eboot "$(cygpath -m "$ST/eboot.bin")" --paid 0x3800000000000011 >/dev/null
+    --eboot "$(cygpath -m "$ST/eboot.bin")" --paid 0x3800000000000011
 rm -f "$ST/x.oelf"
 cp "$OO/samples/piglet/sce_sys/about/right.sprx" "$ST/sce_sys/about/"
 cp "$OO/samples/piglet/sce_module/libc.prx" "$OO/samples/piglet/sce_module/libSceFios2.prx" "$ST/sce_module/"
 FILES="eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
+[ "$HAVE_PIC1" = 1 ] && FILES="$FILES sce_sys/pic1.png"
 # Arquivos de dados do emulador (create-gp4 só aceita algumas pastas na raiz; use assets/misc).
 # Os jogos de PS5 NÃO entram no pacote: ficam no USB (/mnt/usb0) ou em /data e são apontados
 # pelo menu/KYTY_MOUNTS.
