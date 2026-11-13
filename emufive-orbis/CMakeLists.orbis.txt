@@ -1,0 +1,125 @@
+# KytyPS5 core for the PS4 (Orbis), stage 1: everything except graphics, the launcher and the parts
+# that need FFmpeg or SDL. Meant to be driven from the Orbis Eden tree:
+#
+#   cmake -S <folder that holds this file as CMakeLists.txt> -DKYTY_ROOT=<patched KytyPS5 checkout> \
+#         -DCMAKE_TOOLCHAIN_FILE=<eden-ps4.cmake> -DKYTY_EXTRA_DEPS=<xbyak/zydis/zstd checkouts>
+#
+# KYTY_ROOT must already have the EmuFive patches 0001-0005 and then 0100-orbis-port applied.
+# The toolchain file is the Orbis Eden one (toolchain/eden-ps4.cmake): it carries -D__ORBIS__,
+# -U__FreeBSD__, libc++ 18, emulated TLS and -march=btver2.
+cmake_minimum_required(VERSION 3.25)
+project(kyty_ps4 C CXX)
+
+set(KYTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "the KytyPS5 checkout (patched)")
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(KYTY_SOURCE_DIR "${KYTY_ROOT}/src")
+set(KYTY_3RD "${KYTY_ROOT}/3rdparty")
+set(KYTY_EXTRA_DEPS "" CACHE PATH "folder with xbyak/ zydis/ zstd/ checkouts (see README-ORBIS.md)")
+set(KYTY_FFMPEG_PREFIX "" CACHE PATH "FFmpeg for the PS4 (Orbis Eden's prefix/); empty = the FFmpeg-free subset")
+
+# ---- generated headers --------------------------------------------------------------------------
+set(GEN "${CMAKE_BINARY_DIR}/gen")
+file(MAKE_DIRECTORY "${GEN}")
+file(WRITE "${GEN}/cmake_config.h"
+"#define KYTY_VERSION \"0.0-orbis\"\n#define KYTY_BUILD_REPOSITORY \"\"\n#define KYTY_RELEASE_TAG \"\"\n"
+"#define KYTY_PLATFORM KYTY_PLATFORM_LINUX\n#define KYTY_COMPILER KYTY_COMPILER_CLANG\n"
+"#define KYTY_TOOLCHAIN \"clang-lld\"\n#define KYTY_BUILD KYTY_BUILD_RELEASE\n")
+configure_file("${KYTY_SOURCE_DIR}/kytyGitVersion.h.in" "${GEN}/kytyGitVersion.h" @ONLY)
+file(GLOB localization_catalogs CONFIGURE_DEPENDS "${KYTY_ROOT}/assets/localization/*.json")
+add_custom_command(OUTPUT "${GEN}/localizationData.h"
+	COMMAND ${CMAKE_COMMAND} "-DINPUTS=${localization_catalogs}" "-DOUTPUT=${GEN}/localizationData.h"
+		-P "${KYTY_SOURCE_DIR}/embed_localization.cmake"
+	DEPENDS ${localization_catalogs} "${KYTY_SOURCE_DIR}/embed_localization.cmake" VERBATIM)
+
+# ---- sources ------------------------------------------------------------------------------------
+file(GLOB common_src  CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/common/*.cpp"
+	"${KYTY_SOURCE_DIR}/common/logging/*.cpp" "${KYTY_SOURCE_DIR}/common/platform/sysLinux*.cpp")
+file(GLOB kernel_src  CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/kernel/*.cpp")
+file(GLOB loader_src  CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/loader/*.cpp")
+file(GLOB libs_src    CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/libs/*.cpp")
+list(FILTER common_src EXCLUDE REGEX "/sysWindows[^/]*$")
+# Left out of stage 1: SDL HID (replaced by the stub), FFmpeg users (until FFmpeg is rebuilt with
+# avformat/swresample/AAC/MP3 for the PS4), and the Tracy profiler (replaced by no-ops in the patch).
+set(KYTY_NEEDS_FFMPEG avPlayer libAudio libVideoDec2 libVdecsw videoDec2Decoder ajm)
+set(KYTY_DROP dualSenseHaptics dualSenseBluetooth)
+if(NOT KYTY_FFMPEG_PREFIX)
+	list(APPEND KYTY_DROP ${KYTY_NEEDS_FFMPEG} libFont libFontFt)
+endif()
+foreach(name IN LISTS KYTY_DROP)
+	list(FILTER libs_src EXCLUDE REGEX "/${name}\\.cpp$")
+endforeach()
+file(GLOB_RECURSE ajm_src CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/libs/ajm/*.cpp")
+if(KYTY_FFMPEG_PREFIX)
+	list(APPEND libs_src ${ajm_src})
+endif()
+
+set(ORBIS_SHIM "${KYTY_ROOT}/orbis")
+add_library(kyty_core STATIC ${common_src} ${kernel_src} ${loader_src} ${libs_src}
+	"${KYTY_SOURCE_DIR}/emulator.cpp"
+	"${ORBIS_SHIM}/sdl3_shim/sdl3_shim.cpp" "${ORBIS_SHIM}/stubs/dualSenseHaptics_orbis.cpp"
+	"${GEN}/localizationData.h")
+
+target_compile_definitions(kyty_core PUBLIC KYTY_ORBIS_STAGE1=1)
+target_compile_options(kyty_core PRIVATE -ferror-limit=0 -w
+	-include "${KYTY_SOURCE_DIR}/common/orbis/atomicRef.h")
+target_compile_options(kyty_core PUBLIC -fexperimental-library)
+target_include_directories(kyty_core PUBLIC
+	"${GEN}" "${KYTY_SOURCE_DIR}" "${ORBIS_SHIM}/sdl3_shim"
+	"${KYTY_3RD}/fmt/include" "${KYTY_3RD}/magic_enum/include" "${KYTY_3RD}/magic_enum/include/magic_enum"
+	"${KYTY_3RD}/spdlog/include" "${KYTY_3RD}/nlohmann_json/include" "${KYTY_3RD}/xxHash"
+	"${KYTY_3RD}/Vulkan-Headers/include" "${KYTY_3RD}/VulkanMemoryAllocator/include"
+	"${KYTY_3RD}/SPIRV-Headers/include" "${KYTY_3RD}/imgui" "${KYTY_3RD}/tracy/public"
+	"${KYTY_3RD}/stb" "${KYTY_3RD}/renderdoc" "${KYTY_3RD}/LibAtrac9/C/src"
+	"${KYTY_EXTRA_DEPS}/xbyak" "${KYTY_EXTRA_DEPS}/zydis/include"
+	"${KYTY_EXTRA_DEPS}/zydis/dependencies/zycore/include" "${KYTY_EXTRA_DEPS}/zstd/lib"
+	"${KYTY_EXTRA_DEPS}/zarchive/include" "${KYTY_EXTRA_DEPS}/opus/include" "${KYTY_3RD}/cpuinfo/include")
+if(KYTY_FFMPEG_PREFIX)
+	target_include_directories(kyty_core PUBLIC "${KYTY_FFMPEG_PREFIX}/include")
+endif()
+
+# ---------------------------------------------------------------------------------------------
+# Stage 2: o executavel kyty-ps4 (kyty_core + bibliotecas de terceiros + stubs + main do Orbis)
+# ---------------------------------------------------------------------------------------------
+set(KYTY_3RD_SRC "")
+# fmt
+list(APPEND KYTY_3RD_SRC "${KYTY_3RD}/fmt/src/format.cc")
+# zarchive + zstd (sem o assembly do zstd)
+list(APPEND KYTY_3RD_SRC "${KYTY_EXTRA_DEPS}/zarchive/src/zarchivereader.cpp"
+	"${KYTY_EXTRA_DEPS}/zarchive/src/zarchivewriter.cpp" "${KYTY_EXTRA_DEPS}/zarchive/src/sha_256.c")
+file(GLOB zstd_src CONFIGURE_DEPENDS "${KYTY_EXTRA_DEPS}/zstd/lib/common/*.c"
+	"${KYTY_EXTRA_DEPS}/zstd/lib/compress/*.c" "${KYTY_EXTRA_DEPS}/zstd/lib/decompress/*.c")
+list(APPEND KYTY_3RD_SRC ${zstd_src})
+# zydis + zycore
+file(GLOB zydis_src CONFIGURE_DEPENDS "${KYTY_EXTRA_DEPS}/zydis/src/*.c")
+file(GLOB zycore_src CONFIGURE_DEPENDS "${KYTY_EXTRA_DEPS}/zydis/dependencies/zycore/src/*.c")
+list(APPEND KYTY_3RD_SRC ${zydis_src} ${zycore_src})
+# Atrac9
+file(GLOB atrac9_src CONFIGURE_DEPENDS "${KYTY_3RD}/LibAtrac9/C/src/*.c")
+list(APPEND KYTY_3RD_SRC ${atrac9_src})
+
+add_library(kyty_3rd STATIC ${KYTY_3RD_SRC})
+target_compile_definitions(kyty_3rd PRIVATE ZSTD_DISABLE_ASM=1 ZYDIS_STATIC_BUILD=1 ZYCORE_STATIC_BUILD=1
+	ZSTD_MULTITHREAD=0 ZSTD_LEGACY_SUPPORT=0 ZSTD_HAVE_WEAK_SYMBOLS=0 ZSTD_TRACE=0)
+target_compile_options(kyty_3rd PRIVATE -w)
+target_include_directories(kyty_3rd PRIVATE
+	"${KYTY_3RD}/fmt/include" "${KYTY_EXTRA_DEPS}/zarchive/include" "${KYTY_EXTRA_DEPS}/zstd/lib"
+	"${KYTY_EXTRA_DEPS}/zstd/lib/common" "${KYTY_EXTRA_DEPS}/zydis/include" "${KYTY_EXTRA_DEPS}/zydis/src"
+	"${KYTY_EXTRA_DEPS}/zydis/dependencies/zycore/include" "${KYTY_3RD}/LibAtrac9/C/src")
+
+enable_language(ASM)
+add_executable(kyty-ps4
+	"${ORBIS_SHIM}/main/main_orbis.cpp"
+	"${ORBIS_SHIM}/stubs/stub_trap.cpp"
+	"${ORBIS_SHIM}/stubs/unported_stubs.S"
+	"${ORBIS_SHIM}/stubs/compat_orbis.cpp")
+# Pecas do frontend do Eden (wmemchr de 32 bits e o runtime de TLS emulado, pois o toolchain usa
+# -femulated-tls). KYTY_EDEN_FRONTEND = a pasta frontend/ do Eden.
+set(KYTY_EDEN_FRONTEND "" CACHE PATH "pasta frontend/ do Orbis Eden")
+if(KYTY_EDEN_FRONTEND)
+	target_sources(kyty-ps4 PRIVATE "${KYTY_EDEN_FRONTEND}/libc_wide_fixes.cpp"
+		"${KYTY_EDEN_FRONTEND}/emutls/emutls.c")
+endif()
+target_link_libraries(kyty-ps4 PRIVATE kyty_core kyty_3rd
+	-lSceAudioOut -lScePad -lSceUserService -lSceSystemService -lSceSysmodule -lSceNet)
+set_target_properties(kyty-ps4 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

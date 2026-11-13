@@ -1,0 +1,135 @@
+--- a/src/common/orbis/mcontext.h
++++ b/src/common/orbis/mcontext.h
+@@ -19,6 +19,8 @@
+ 	uint32_t mc_flags;
+ 	uint16_t mc_es, mc_ds;
+ 	int64_t  mc_err, mc_rip, mc_cs, mc_rflags, mc_rsp, mc_ss;
++	int64_t  mc_len, mc_fpformat, mc_ownedfp; // FreeBSD amd64: the FXSAVE image follows (xmm0 at +160)
++	alignas(16) int64_t mc_fpstate[64];
+ };
+ struct OrbisUContext {
+ 	uint8_t       uc_header[64]; // measured on a PS4: the mcontext starts at offset 64
+@@ -29,6 +31,14 @@
+                   offsetof(OrbisMContext, mc_rsp) == 184,
+               "must match the offsets measured on the PS4");
+ 
++static_assert(offsetof(OrbisMContext, mc_fpstate) == 224, "FreeBSD amd64 mcontext layout");
++
++#include <sys/types.h>
++#include <sys/uio.h>
++// Not in the PS4 libc: orbis/stubs/compat_orbis.cpp provides it (readability probe of guest memory).
++extern "C" ssize_t process_vm_readv(int, const struct iovec*, unsigned long, const struct iovec*,
++                                    unsigned long, unsigned long);
++
+ inline OrbisMContext* OrbisContext(const void* native_context) {
+ 	return &static_cast<OrbisUContext*>(const_cast<void*>(native_context))->uc_mcontext;
+ }
+--- a/src/kernel/pthread.cpp
++++ b/src/kernel/pthread.cpp
+@@ -45,6 +45,8 @@
+ 
+ #if defined(__ORBIS__)
+ extern "C" int pthread_attr_get_np(pthread_t, pthread_attr_t*); // FreeBSD name for pthread_getattr_np
++// FreeBSD's pthread_set_name_np, declared under our own name so it cannot clash with the SDK header.
++extern "C" void orbis_set_thread_name(pthread_t, const char*) __asm__("pthread_set_name_np");
+ #endif
+ 
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+@@ -3231,6 +3233,8 @@
+ 	if (!thread->name.empty()) {
+ #if defined(__APPLE__)
+ 		pthread_setname_np(thread->name.substr(0, 63).c_str());
++#elif defined(__ORBIS__)
++		orbis_set_thread_name(pthread_self(), thread->name.substr(0, 31).c_str());
+ #else
+ 		pthread_setname_np(pthread_self(), thread->name.substr(0, 15).c_str());
+ #endif
+--- a/src/loader/guestInstructionPatcher.cpp
++++ b/src/loader/guestInstructionPatcher.cpp
+@@ -35,6 +35,9 @@
+ #else
+ #include <ucontext.h>
+ #endif
++#if defined(__ORBIS__)
++#include "common/orbis/mcontext.h"
++#endif
+ #if defined(__linux__)
+ #include <linux/membarrier.h>
+ #include <sys/syscall.h>
+@@ -1749,6 +1752,8 @@
+ 	return reinterpret_cast<u64&>(static_cast<PCONTEXT>(native_context)->Rip);
+ #elif defined(__APPLE__)
+ 	return reinterpret_cast<u64&>(static_cast<ucontext_t*>(native_context)->uc_mcontext->__ss.__rip);
++#elif defined(__ORBIS__)
++	return reinterpret_cast<u64&>(OrbisContext(native_context)->mc_rip);
+ #else
+ 	return reinterpret_cast<u64&>(static_cast<ucontext_t*>(native_context)->uc_mcontext.gregs[REG_RIP]);
+ #endif
+--- a/src/loader/runtimeLinker.cpp
++++ b/src/loader/runtimeLinker.cpp
+@@ -44,6 +44,9 @@
+ #include <mach/mach_vm.h>
+ #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+ #include <sys/uio.h>
++#if defined(__ORBIS__)
++#include "common/orbis/mcontext.h"
++#endif
+ #include <unistd.h>
+ #endif
+ #endif
+--- a/src/loader/x64InstructionEmulator.cpp
++++ b/src/loader/x64InstructionEmulator.cpp
+@@ -18,6 +18,9 @@
+ #include <sched.h>
+ #include <ucontext.h>
+ #endif
++#if defined(__ORBIS__)
++#include "common/orbis/mcontext.h"
++#endif
+ 
+ namespace Loader::X64InstructionEmulator {
+ 
+@@ -479,6 +482,34 @@
+ 		auto* ymmh = &avx->__fs.__fpu_ymmh0;
+ 		ymmh[index] = {};
+ 	}
++#elif defined(__ORBIS__)
++	OrbisUContext* native;
++
++	[[nodiscard]] uint64_t Rip() const {
++		return static_cast<uint64_t>(native->uc_mcontext.mc_rip);
++	}
++	void Advance(size_t length) {
++		native->uc_mcontext.mc_rip += static_cast<int64_t>(length);
++	}
++	[[nodiscard]] void* Xmm(uint8_t index) const {
++		// FXSAVE image: xmm0 at +160, 16 bytes each (the signal frame has no XSAVE area here).
++		return reinterpret_cast<uint8_t*>(native->uc_mcontext.mc_fpstate) + 160 + index * 16;
++	}
++
++	[[nodiscard]] auto& Gpr(uint8_t index) const {
++		static constexpr int64_t OrbisMContext::* registers[] = {
++		    &OrbisMContext::mc_rax, &OrbisMContext::mc_rcx, &OrbisMContext::mc_rdx,
++		    &OrbisMContext::mc_rbx, &OrbisMContext::mc_rsp, &OrbisMContext::mc_rbp,
++		    &OrbisMContext::mc_rsi, &OrbisMContext::mc_rdi, &OrbisMContext::mc_r8,
++		    &OrbisMContext::mc_r9,  &OrbisMContext::mc_r10, &OrbisMContext::mc_r11,
++		    &OrbisMContext::mc_r12, &OrbisMContext::mc_r13, &OrbisMContext::mc_r14,
++		    &OrbisMContext::mc_r15};
++		return native->uc_mcontext.*registers[index];
++	}
++
++	void ClearUpperYmm(uint8_t) const {
++		// No XSAVE area in the PS4 frame: the upper halves are left as they were.
++	}
+ #else
+ 	ucontext_t* native;
+ 
+@@ -811,6 +842,8 @@
+ 		return false;
+ 	}
+ 	Context context {saved_context};
++#elif defined(__ORBIS__)
++	Context context {static_cast<OrbisUContext*>(native_context)};
+ #else
+ 	Context context {static_cast<ucontext_t*>(native_context)};
+ #endif

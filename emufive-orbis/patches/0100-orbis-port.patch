@@ -1,0 +1,945 @@
+diff --git a/CMakeLists.orbis.txt b/CMakeLists.orbis.txt
+new file mode 100644
+index 00000000..3421ea1e
+--- /dev/null
++++ b/CMakeLists.orbis.txt
+@@ -0,0 +1,78 @@
++# KytyPS5 core for the PS4 (Orbis), stage 1: everything except graphics, the launcher and the parts
++# that need FFmpeg or SDL. Meant to be driven from the Orbis Eden tree:
++#
++#   cmake -S <folder that holds this file as CMakeLists.txt> -DKYTY_ROOT=<patched KytyPS5 checkout> \
++#         -DCMAKE_TOOLCHAIN_FILE=<eden-ps4.cmake> -DKYTY_EXTRA_DEPS=<xbyak/zydis/zstd checkouts>
++#
++# KYTY_ROOT must already have the EmuFive patches 0001-0005 and then 0100-orbis-port applied.
++# The toolchain file is the Orbis Eden one (toolchain/eden-ps4.cmake): it carries -D__ORBIS__,
++# -U__FreeBSD__, libc++ 18, emulated TLS and -march=btver2.
++cmake_minimum_required(VERSION 3.25)
++project(kyty_ps4 C CXX)
++
++set(KYTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "the KytyPS5 checkout (patched)")
++set(CMAKE_CXX_STANDARD 20)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(KYTY_SOURCE_DIR "${KYTY_ROOT}/src")
++set(KYTY_3RD "${KYTY_ROOT}/3rdparty")
++set(KYTY_EXTRA_DEPS "" CACHE PATH "folder with xbyak/ zydis/ zstd/ checkouts (see README-ORBIS.md)")
++set(KYTY_FFMPEG_PREFIX "" CACHE PATH "FFmpeg for the PS4 (Orbis Eden's prefix/); empty = the FFmpeg-free subset")
++
++# ---- generated headers --------------------------------------------------------------------------
++set(GEN "${CMAKE_BINARY_DIR}/gen")
++file(MAKE_DIRECTORY "${GEN}")
++file(WRITE "${GEN}/cmake_config.h"
++"#define KYTY_VERSION \"0.0-orbis\"\n#define KYTY_BUILD_REPOSITORY \"\"\n#define KYTY_RELEASE_TAG \"\"\n"
++"#define KYTY_PLATFORM KYTY_PLATFORM_LINUX\n#define KYTY_COMPILER KYTY_COMPILER_CLANG\n"
++"#define KYTY_TOOLCHAIN \"clang-lld\"\n#define KYTY_BUILD KYTY_BUILD_RELEASE\n")
++configure_file("${KYTY_SOURCE_DIR}/kytyGitVersion.h.in" "${GEN}/kytyGitVersion.h" @ONLY)
++file(GLOB localization_catalogs CONFIGURE_DEPENDS "${KYTY_ROOT}/assets/localization/*.json")
++add_custom_command(OUTPUT "${GEN}/localizationData.h"
++	COMMAND ${CMAKE_COMMAND} "-DINPUTS=${localization_catalogs}" "-DOUTPUT=${GEN}/localizationData.h"
++		-P "${KYTY_SOURCE_DIR}/embed_localization.cmake"
++	DEPENDS ${localization_catalogs} "${KYTY_SOURCE_DIR}/embed_localization.cmake" VERBATIM)
++
++# ---- sources ------------------------------------------------------------------------------------
++file(GLOB common_src  CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/common/*.cpp"
++	"${KYTY_SOURCE_DIR}/common/logging/*.cpp" "${KYTY_SOURCE_DIR}/common/platform/sysLinux*.cpp")
++file(GLOB kernel_src  CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/kernel/*.cpp")
++file(GLOB loader_src  CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/loader/*.cpp")
++file(GLOB libs_src    CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/libs/*.cpp")
++list(FILTER common_src EXCLUDE REGEX "/sysWindows[^/]*$")
++# Left out of stage 1: SDL HID (replaced by the stub), FFmpeg users (until FFmpeg is rebuilt with
++# avformat/swresample/AAC/MP3 for the PS4), and the Tracy profiler (replaced by no-ops in the patch).
++set(KYTY_NEEDS_FFMPEG avPlayer libAudio libVideoDec2 libVdecsw videoDec2Decoder ajm)
++set(KYTY_DROP dualSenseHaptics dualSenseBluetooth)
++if(NOT KYTY_FFMPEG_PREFIX)
++	list(APPEND KYTY_DROP ${KYTY_NEEDS_FFMPEG} libFont libFontFt)
++endif()
++foreach(name IN LISTS KYTY_DROP)
++	list(FILTER libs_src EXCLUDE REGEX "/${name}\\.cpp$")
++endforeach()
++file(GLOB_RECURSE ajm_src CONFIGURE_DEPENDS "${KYTY_SOURCE_DIR}/libs/ajm/*.cpp")
++if(KYTY_FFMPEG_PREFIX)
++	list(APPEND libs_src ${ajm_src})
++endif()
++
++set(ORBIS_SHIM "${KYTY_ROOT}/orbis")
++add_library(kyty_core STATIC ${common_src} ${kernel_src} ${loader_src} ${libs_src}
++	"${ORBIS_SHIM}/sdl3_shim/sdl3_shim.cpp" "${ORBIS_SHIM}/stubs/dualSenseHaptics_orbis.cpp"
++	"${GEN}/localizationData.h")
++
++target_compile_definitions(kyty_core PUBLIC KYTY_ORBIS_STAGE1=1)
++target_compile_options(kyty_core PRIVATE -ferror-limit=0 -w
++	-include "${KYTY_SOURCE_DIR}/common/orbis/atomicRef.h")
++target_compile_options(kyty_core PUBLIC -fexperimental-library)
++target_include_directories(kyty_core PUBLIC
++	"${GEN}" "${KYTY_SOURCE_DIR}" "${ORBIS_SHIM}/sdl3_shim"
++	"${KYTY_3RD}/fmt/include" "${KYTY_3RD}/magic_enum/include" "${KYTY_3RD}/magic_enum/include/magic_enum"
++	"${KYTY_3RD}/spdlog/include" "${KYTY_3RD}/nlohmann_json/include" "${KYTY_3RD}/xxHash"
++	"${KYTY_3RD}/Vulkan-Headers/include" "${KYTY_3RD}/VulkanMemoryAllocator/include"
++	"${KYTY_3RD}/SPIRV-Headers/include" "${KYTY_3RD}/imgui" "${KYTY_3RD}/tracy/public"
++	"${KYTY_3RD}/stb" "${KYTY_3RD}/renderdoc" "${KYTY_3RD}/LibAtrac9/C/src"
++	"${KYTY_EXTRA_DEPS}/xbyak" "${KYTY_EXTRA_DEPS}/zydis/include"
++	"${KYTY_EXTRA_DEPS}/zydis/dependencies/zycore/include" "${KYTY_EXTRA_DEPS}/zstd/lib"
++	"${KYTY_EXTRA_DEPS}/zarchive/include" "${KYTY_EXTRA_DEPS}/opus/include" "${KYTY_3RD}/cpuinfo/include")
++if(KYTY_FFMPEG_PREFIX)
++	target_include_directories(kyty_core PUBLIC "${KYTY_FFMPEG_PREFIX}/include")
++endif()
+diff --git a/orbis/sdl3_shim/SDL3/SDL.h b/orbis/sdl3_shim/SDL3/SDL.h
+new file mode 100644
+index 00000000..00df92ca
+--- /dev/null
++++ b/orbis/sdl3_shim/SDL3/SDL.h
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// A small stand-in for the parts of SDL3 that KytyPS5's core libraries (libs/audio, controller,
++// libCes, libFont) use, built on the PS4's own services (sceAudioOut, libc iconv). There is no SDL3
++// for the PS4. Anything not listed here is not provided on purpose: the window, the launcher and
++// the DualSense code are replaced or left out on the Orbis build, not emulated.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
++extern "C" {
++
++// ---- basics -----------------------------------------------------------------------------------
++typedef uint32_t SDL_InitFlags;
++inline constexpr SDL_InitFlags SDL_INIT_AUDIO   = 0x00000010u;
++inline constexpr SDL_InitFlags SDL_INIT_GAMEPAD = 0x00002000u;
++
++bool        SDL_InitSubSystem(SDL_InitFlags flags);
++void        SDL_QuitSubSystem(SDL_InitFlags flags);
++const char* SDL_GetError(void);
++void        SDL_free(void* mem);
++uint64_t    SDL_GetTicks(void);
++void        SDL_Delay(uint32_t ms);
++/// "/app0/": where the PS4 mounts the package contents.
++const char* SDL_GetBasePath(void);
++
++// ---- audio streams (sceAudioOut) ----------------------------------------------------------------
++typedef uint16_t SDL_AudioFormat;
++inline constexpr SDL_AudioFormat SDL_AUDIO_S16 = 0x8010; // signed 16-bit, little endian
++inline constexpr SDL_AudioFormat SDL_AUDIO_F32 = 0x8120; // 32-bit float, little endian
++typedef uint32_t SDL_AudioDeviceID;
++inline constexpr SDL_AudioDeviceID SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK = 0xFFFFFFFFu;
++
++struct SDL_AudioSpec {
++	SDL_AudioFormat format;
++	int             channels;
++	int             freq;
++};
++struct SDL_AudioStream; // opaque
++typedef void (*SDL_AudioStreamCallback)(void* userdata, SDL_AudioStream* stream, int additional_amount,
++                                        int total_amount);
++
++SDL_AudioStream*   SDL_OpenAudioDeviceStream(SDL_AudioDeviceID devid, const SDL_AudioSpec* spec,
++                                             SDL_AudioStreamCallback callback, void* userdata);
++void               SDL_DestroyAudioStream(SDL_AudioStream* stream);
++bool               SDL_ResumeAudioStreamDevice(SDL_AudioStream* stream);
++bool               SDL_PauseAudioStreamDevice(SDL_AudioStream* stream);
++bool               SDL_PutAudioStreamData(SDL_AudioStream* stream, const void* buf, int len);
++int                SDL_GetAudioStreamData(SDL_AudioStream* stream, void* buf, int len);
++int                SDL_GetAudioStreamQueued(SDL_AudioStream* stream);
++int                SDL_GetAudioStreamAvailable(SDL_AudioStream* stream);
++bool               SDL_ClearAudioStream(SDL_AudioStream* stream);
++SDL_AudioDeviceID  SDL_GetAudioStreamDevice(SDL_AudioStream* stream);
++bool               SDL_AudioDevicePaused(SDL_AudioDeviceID dev);
++/// The PS4 build has no audio capture: always an empty list.
++SDL_AudioDeviceID* SDL_GetAudioRecordingDevices(int* count);
++const char*        SDL_GetAudioDeviceName(SDL_AudioDeviceID devid);
++
++// ---- gamepads (the controller is read by the Orbis input layer, not through SDL) ----------------
++typedef uint32_t SDL_JoystickID;
++typedef uint32_t SDL_PropertiesID;
++struct SDL_Gamepad; // opaque; never created
++enum SDL_GamepadType { SDL_GAMEPAD_TYPE_UNKNOWN = 0, SDL_GAMEPAD_TYPE_STANDARD, SDL_GAMEPAD_TYPE_PS4, SDL_GAMEPAD_TYPE_PS5 };
++enum SDL_SensorType { SDL_SENSOR_INVALID = -1, SDL_SENSOR_UNKNOWN, SDL_SENSOR_ACCEL, SDL_SENSOR_GYRO };
++inline constexpr float SDL_STANDARD_GRAVITY = 9.80665f;
++#define SDL_PROP_GAMEPAD_CAP_MONO_LED_BOOLEAN "SDL.joystick.cap.mono_led"
++
++SDL_Gamepad*     SDL_GetGamepadFromID(SDL_JoystickID id);
++void             SDL_CloseGamepad(SDL_Gamepad* gamepad);
++SDL_GamepadType  SDL_GetGamepadType(SDL_Gamepad* gamepad);
++SDL_PropertiesID SDL_GetGamepadProperties(SDL_Gamepad* gamepad);
++bool             SDL_GetBooleanProperty(SDL_PropertiesID props, const char* name, bool default_value);
++bool             SDL_RumbleGamepad(SDL_Gamepad* gamepad, uint16_t low, uint16_t high, uint32_t ms);
++bool             SDL_SetGamepadLED(SDL_Gamepad* gamepad, uint8_t r, uint8_t g, uint8_t b);
++bool             SDL_SendGamepadEffect(SDL_Gamepad* gamepad, const void* data, int size);
++bool             SDL_GamepadHasSensor(SDL_Gamepad* gamepad, SDL_SensorType type);
++bool             SDL_SetGamepadSensorEnabled(SDL_Gamepad* gamepad, SDL_SensorType type, bool enabled);
++
++// ---- iconv (libCes): the PS4 libc has iconv ------------------------------------------------------
++typedef struct SDL_iconv_data_t* SDL_iconv_t;
++#define SDL_ICONV_ERROR  (static_cast<size_t>(-1))
++#define SDL_ICONV_E2BIG  (static_cast<size_t>(-2))
++#define SDL_ICONV_EILSEQ (static_cast<size_t>(-3))
++#define SDL_ICONV_EINVAL (static_cast<size_t>(-4))
++SDL_iconv_t SDL_iconv_open(const char* tocode, const char* fromcode);
++int         SDL_iconv_close(SDL_iconv_t cd);
++size_t      SDL_iconv(SDL_iconv_t cd, const char** inbuf, size_t* inbytesleft, char** outbuf,
++                      size_t* outbytesleft);
++
++} // extern "C"
+diff --git a/orbis/sdl3_shim/SDL3/SDL_stdinc.h b/orbis/sdl3_shim/SDL3/SDL_stdinc.h
+new file mode 100644
+index 00000000..4d2c5fac
+--- /dev/null
++++ b/orbis/sdl3_shim/SDL3/SDL_stdinc.h
+@@ -0,0 +1,2 @@
++#pragma once
++#include <SDL3/SDL.h>
+diff --git a/orbis/sdl3_shim/sdl3_shim.cpp b/orbis/sdl3_shim/sdl3_shim.cpp
+new file mode 100644
+index 00000000..ede16f9a
+--- /dev/null
++++ b/orbis/sdl3_shim/sdl3_shim.cpp
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// See SDL3/SDL.h. Audio: one sceAudioOut port per stream, fed by a thread that is paced by the
++// hardware (sceAudioOutOutput blocks until the port has room), same scheme as the Orbis Eden sink.
++
++#include <SDL3/SDL.h>
++
++#include <algorithm>
++#include <atomic>
++#include <cerrno>
++#include <cmath>
++#include <ctime>
++#include <iconv.h>
++#include <mutex>
++#include <pthread.h>
++#include <thread>
++#include <unistd.h>
++#include <vector>
++
++extern "C" {
++int sceAudioOutInit(void);
++int sceAudioOutOpen(int user_id, int type, int index, unsigned int len, unsigned int freq,
++                    unsigned int param);
++int sceAudioOutOutput(int handle, const void* ptr);
++int sceAudioOutClose(int handle);
++}
++
++namespace {
++constexpr int      UserIdSystem  = 0xFF; // SCE_USER_SERVICE_USER_ID_SYSTEM
++constexpr int      PortTypeMain  = 0;    // SCE_AUDIO_OUT_PORT_TYPE_MAIN
++constexpr unsigned ParamS16Ster  = 1;    // SCE_AUDIO_OUT_PARAM_FORMAT_S16_STEREO
++constexpr unsigned GrainFrames   = 256;
++constexpr unsigned OutputRate    = 48000; // the only rate the main port takes
++
++bool InitAudioOut() {
++	static const int result = sceAudioOutInit();
++	return result == 0 || static_cast<unsigned>(result) == 0x8026000Eu; // 0x8026000E: already done
++}
++
++int16_t ToS16(float v) {
++	v = std::clamp(v, -1.0f, 1.0f);
++	return static_cast<int16_t>(std::lrintf(v * 32767.0f));
++}
++} // namespace
++
++struct SDL_AudioStream {
++	SDL_AudioSpec        spec {};
++	int                  handle = -1;
++	std::atomic<bool>    paused {true};
++	std::atomic<bool>    stop {false};
++	std::mutex           lock;
++	std::vector<uint8_t> queue; // bytes in the stream's own format
++	size_t               head = 0;
++	std::thread          feeder;
++
++	size_t BytesPerFrame() const {
++		return static_cast<size_t>(spec.channels) * (spec.format == SDL_AUDIO_F32 ? 4u : 2u);
++	}
++	size_t Queued() {
++		std::lock_guard<std::mutex> g(lock);
++		return queue.size() - head;
++	}
++
++	// One stereo S16 frame at the output rate from the frame at (fractional) source index.
++	void Render(int16_t* out, unsigned frames) {
++		const size_t bpf = BytesPerFrame();
++		const double step = static_cast<double>(spec.freq) / OutputRate; // nearest-neighbour resample
++		std::lock_guard<std::mutex> g(lock);
++		double pos = 0.0;
++		for (unsigned i = 0; i < frames; ++i) {
++			const size_t src_frame = static_cast<size_t>(pos);
++			const size_t off = head + src_frame * bpf;
++			if (off + bpf > queue.size()) {
++				out[i * 2] = out[i * 2 + 1] = 0; // underrun: silence
++				pos += step;
++				continue;
++			}
++			float ch[8] = {};
++			const int n = std::min(spec.channels, 8);
++			for (int c = 0; c < n; ++c) {
++				if (spec.format == SDL_AUDIO_F32) {
++					float f;
++					std::memcpy(&f, &queue[off + c * 4], 4);
++					ch[c] = f;
++				} else {
++					int16_t s;
++					std::memcpy(&s, &queue[off + c * 2], 2);
++					ch[c] = static_cast<float>(s) / 32768.0f;
++				}
++			}
++			float l = ch[0], r = n > 1 ? ch[1] : ch[0];
++			if (n >= 6) { // 5.1/7.1 in SDL order (FL FR FC LFE BL BR [SL SR]): fold down
++				l += 0.707f * ch[2] + 0.5f * ch[4];
++				r += 0.707f * ch[2] + 0.5f * ch[5];
++				if (n >= 8) {
++					l += 0.5f * ch[6];
++					r += 0.5f * ch[7];
++				}
++				l *= 0.6f;
++				r *= 0.6f;
++			}
++			out[i * 2]     = ToS16(l);
++			out[i * 2 + 1] = ToS16(r);
++			pos += step;
++		}
++		const size_t consumed = std::min(queue.size() - head, static_cast<size_t>(pos) * bpf);
++		head += consumed;
++		if (head > (1u << 20) && head * 2 > queue.size()) { // compact now and then
++			queue.erase(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(head));
++			head = 0;
++		}
++	}
++
++	void Feed() {
++		std::vector<int16_t> grain(GrainFrames * 2);
++		while (!stop.load()) {
++			if (paused.load()) {
++				std::fill(grain.begin(), grain.end(), 0);
++			} else {
++				Render(grain.data(), GrainFrames);
++			}
++			sceAudioOutOutput(handle, grain.data());
++		}
++		sceAudioOutOutput(handle, nullptr); // wait for the last grain
++	}
++};
++
++extern "C" {
++
++static thread_local char g_error[128] = "";
++
++bool SDL_InitSubSystem(SDL_InitFlags) { return true; }
++void SDL_QuitSubSystem(SDL_InitFlags) {}
++const char* SDL_GetError(void) { return g_error; }
++void SDL_free(void* mem) { std::free(mem); }
++uint64_t SDL_GetTicks(void) {
++	timespec ts {};
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return static_cast<uint64_t>(ts.tv_sec) * 1000u + static_cast<uint64_t>(ts.tv_nsec) / 1000000u;
++}
++void SDL_Delay(uint32_t ms) { usleep(ms * 1000u); }
++const char* SDL_GetBasePath(void) { return "/app0/"; }
++
++SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID, const SDL_AudioSpec* spec,
++                                           SDL_AudioStreamCallback, void*) {
++	if (spec == nullptr || spec->channels < 1 || spec->freq < 8000 ||
++	    (spec->format != SDL_AUDIO_S16 && spec->format != SDL_AUDIO_F32)) {
++		std::snprintf(g_error, sizeof(g_error), "unsupported audio spec");
++		return nullptr;
++	}
++	if (!InitAudioOut()) {
++		std::snprintf(g_error, sizeof(g_error), "sceAudioOutInit failed");
++		return nullptr;
++	}
++	auto* s = new SDL_AudioStream;
++	s->spec = *spec;
++	s->handle = sceAudioOutOpen(UserIdSystem, PortTypeMain, 0, GrainFrames, OutputRate, ParamS16Ster);
++	if (s->handle < 0) {
++		std::snprintf(g_error, sizeof(g_error), "sceAudioOutOpen failed: 0x%x", static_cast<unsigned>(s->handle));
++		delete s;
++		return nullptr;
++	}
++	s->feeder = std::thread([s] { s->Feed(); });
++	return s;
++}
++
++void SDL_DestroyAudioStream(SDL_AudioStream* s) {
++	if (s == nullptr) { return; }
++	s->stop = true;
++	if (s->feeder.joinable()) { s->feeder.join(); }
++	if (s->handle >= 0) { sceAudioOutClose(s->handle); }
++	delete s;
++}
++bool SDL_ResumeAudioStreamDevice(SDL_AudioStream* s) { if (!s) return false; s->paused = false; return true; }
++bool SDL_PauseAudioStreamDevice(SDL_AudioStream* s) { if (!s) return false; s->paused = true; return true; }
++bool SDL_PutAudioStreamData(SDL_AudioStream* s, const void* buf, int len) {
++	if (!s || !buf || len < 0) { return false; }
++	std::lock_guard<std::mutex> g(s->lock);
++	const auto* p = static_cast<const uint8_t*>(buf);
++	s->queue.insert(s->queue.end(), p, p + len);
++	return true;
++}
++int SDL_GetAudioStreamData(SDL_AudioStream*, void*, int) { return 0; } // playback streams only
++int SDL_GetAudioStreamQueued(SDL_AudioStream* s) { return s ? static_cast<int>(s->Queued()) : 0; }
++int SDL_GetAudioStreamAvailable(SDL_AudioStream* s) { return s ? static_cast<int>(s->Queued()) : 0; }
++bool SDL_ClearAudioStream(SDL_AudioStream* s) {
++	if (!s) return false;
++	std::lock_guard<std::mutex> g(s->lock);
++	s->queue.clear();
++	s->head = 0;
++	return true;
++}
++SDL_AudioDeviceID SDL_GetAudioStreamDevice(SDL_AudioStream* s) { return s ? 1u : 0u; }
++bool SDL_AudioDevicePaused(SDL_AudioDeviceID) { return false; }
++SDL_AudioDeviceID* SDL_GetAudioRecordingDevices(int* count) { if (count) *count = 0; return nullptr; }
++const char* SDL_GetAudioDeviceName(SDL_AudioDeviceID) { return "PS4 audio out"; }
++
++SDL_Gamepad* SDL_GetGamepadFromID(SDL_JoystickID) { return nullptr; }
++void SDL_CloseGamepad(SDL_Gamepad*) {}
++SDL_GamepadType SDL_GetGamepadType(SDL_Gamepad*) { return SDL_GAMEPAD_TYPE_PS4; }
++SDL_PropertiesID SDL_GetGamepadProperties(SDL_Gamepad*) { return 0; }
++bool SDL_GetBooleanProperty(SDL_PropertiesID, const char*, bool d) { return d; }
++bool SDL_RumbleGamepad(SDL_Gamepad*, uint16_t, uint16_t, uint32_t) { return false; }
++bool SDL_SetGamepadLED(SDL_Gamepad*, uint8_t, uint8_t, uint8_t) { return false; }
++bool SDL_SendGamepadEffect(SDL_Gamepad*, const void*, int) { return false; }
++bool SDL_GamepadHasSensor(SDL_Gamepad*, SDL_SensorType) { return false; }
++bool SDL_SetGamepadSensorEnabled(SDL_Gamepad*, SDL_SensorType, bool) { return false; }
++
++SDL_iconv_t SDL_iconv_open(const char* tocode, const char* fromcode) {
++	iconv_t cd = iconv_open(tocode, fromcode);
++	return cd == reinterpret_cast<iconv_t>(-1) ? reinterpret_cast<SDL_iconv_t>(-1) : reinterpret_cast<SDL_iconv_t>(cd);
++}
++int SDL_iconv_close(SDL_iconv_t cd) {
++	return cd && cd != reinterpret_cast<SDL_iconv_t>(-1) ? iconv_close(reinterpret_cast<iconv_t>(cd)) : 0;
++}
++size_t SDL_iconv(SDL_iconv_t cd, const char** inbuf, size_t* inleft, char** outbuf, size_t* outleft) {
++	const size_t r = iconv(reinterpret_cast<iconv_t>(cd), const_cast<char**>(inbuf), inleft, outbuf, outleft);
++	if (r != static_cast<size_t>(-1)) { return r; }
++	switch (errno) {
++		case E2BIG:  return SDL_ICONV_E2BIG;
++		case EILSEQ: return SDL_ICONV_EILSEQ;
++		case EINVAL: return SDL_ICONV_EINVAL;
++		default:     return SDL_ICONV_ERROR;
++	}
++}
++
++} // extern "C"
+diff --git a/orbis/stubs/dualSenseHaptics_orbis.cpp b/orbis/stubs/dualSenseHaptics_orbis.cpp
+new file mode 100644
+index 00000000..550025c1
+--- /dev/null
++++ b/orbis/stubs/dualSenseHaptics_orbis.cpp
+@@ -0,0 +1,16 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// The DualSense speaker/haptics path talks to the pad over SDL HID, which the PS4 build does not
++// have. "No DualSense took it" is the documented answer for every call, so audio and rumble use
++// their normal paths.
++#include "libs/dualSenseHaptics.h"
++
++namespace Libs::Controller::DualSenseHaptics {
++
++Stream* Open(uint32_t, bool) { return nullptr; }
++void    Close(Stream*) {}
++bool    UsesBluetooth(const Stream*) { return false; }
++uint64_t Queue(Stream*, int, const void*, uint32_t, uint32_t, bool, const int*, float, const float*) { return 0; }
++bool    SetVibration(int, uint8_t, uint8_t, uint32_t) { return false; }
++void    Shutdown() {}
++
++} // namespace Libs::Controller::DualSenseHaptics
+diff --git a/src/common/hostException.cpp b/src/common/hostException.cpp
+index 4e257611..2e81c558 100644
+--- a/src/common/hostException.cpp
++++ b/src/common/hostException.cpp
+@@ -1,4 +1,5 @@
+ #include "common/hostException.h"
++#include "common/orbis/mcontext.h"
+ 
+ #include <atomic>
+ #include <cstdio>
+@@ -76,6 +77,8 @@ int GuestSignalDispatchSignal() {
+ #if defined(__APPLE__)
+ 	// macOS has no realtime signals, and the host uses SIGUSR1 for nothing else.
+ 	return SIGUSR1;
++#elif defined(__ORBIS__)
++	return OrbisSignalGuestDispatch; // the only user signal sceKernelRaiseException can deliver
+ #else
+ 	return SIGRTMIN + 3;
+ #endif
+@@ -139,10 +142,13 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
+ 
+ #else
+ 
++
+ // x86-64 page-fault error code: bit 4 = instruction fetch, bit 1 = write, otherwise a read.
+ static AccessViolationType DecodeAccess(const ucontext_t* context) {
+ #if defined(__APPLE__)
+ 	const auto error = static_cast<uint64_t>(context->uc_mcontext->__es.__err);
++#elif defined(__ORBIS__)
++	const auto error = static_cast<uint64_t>(OrbisContext(context)->mc_err);
+ #else
+ 	const auto error = static_cast<uint64_t>(context->uc_mcontext.gregs[REG_ERR]);
+ #endif
+@@ -180,6 +186,25 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
+ 	info.r13               = registers.__r13;
+ 	info.r14               = registers.__r14;
+ 	info.r15               = registers.__r15;
++#elif defined(__ORBIS__)
++	const auto* registers  = OrbisContext(context);
++	info.exception_address = static_cast<uint64_t>(registers->mc_rip);
++	info.rax               = static_cast<uint64_t>(registers->mc_rax);
++	info.rbx               = static_cast<uint64_t>(registers->mc_rbx);
++	info.rcx               = static_cast<uint64_t>(registers->mc_rcx);
++	info.rdx               = static_cast<uint64_t>(registers->mc_rdx);
++	info.rsi               = static_cast<uint64_t>(registers->mc_rsi);
++	info.rdi               = static_cast<uint64_t>(registers->mc_rdi);
++	info.rbp               = static_cast<uint64_t>(registers->mc_rbp);
++	info.rsp               = static_cast<uint64_t>(registers->mc_rsp);
++	info.r8                = static_cast<uint64_t>(registers->mc_r8);
++	info.r9                = static_cast<uint64_t>(registers->mc_r9);
++	info.r10               = static_cast<uint64_t>(registers->mc_r10);
++	info.r11               = static_cast<uint64_t>(registers->mc_r11);
++	info.r12               = static_cast<uint64_t>(registers->mc_r12);
++	info.r13               = static_cast<uint64_t>(registers->mc_r13);
++	info.r14               = static_cast<uint64_t>(registers->mc_r14);
++	info.r15               = static_cast<uint64_t>(registers->mc_r15);
+ #else
+ 	const auto* registers  = context->uc_mcontext.gregs;
+ 	info.exception_address = static_cast<uint64_t>(registers[REG_RIP]);
+@@ -223,12 +248,31 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
+ 
+ #endif
+ 
++#if defined(__ORBIS__)
++// The kernel handler gets no siginfo: the fault address comes from the machine context.
++static void OrbisExceptionHandler(int signal_number, void* native_context) {
++	siginfo_t info {};
++	info.si_addr = reinterpret_cast<void*>(OrbisContext(native_context)->mc_addr);
++	SignalHandler(signal_number, &info, native_context);
++}
++#endif
++
+ static bool InstallPlatformHandler() {
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ 	if (AddVectoredExceptionHandler(0, ExceptionFilter) == nullptr) {
+ 		printf("AddVectoredExceptionHandler() failed\n");
+ 		return false;
+ 	}
++#else
++#if defined(__ORBIS__)
++	// Faults are delivered through the kernel exception handler, not sigaction (Orbis EDEN).
++	for (const int signal_number: {11 /*SIGSEGV*/, 10 /*SIGBUS*/, 4 /*SIGILL*/}) {
++		if (sceKernelInstallExceptionHandler(signal_number, OrbisExceptionHandler) != 0) {
++			printf("sceKernelInstallExceptionHandler(%d) failed\n", signal_number);
++			return false;
++		}
++	}
++	return true;
+ #else
+ 	struct sigaction action {};
+ 	action.sa_sigaction = SignalHandler;
+@@ -244,6 +288,8 @@ static bool InstallPlatformHandler() {
+ 			return false;
+ 		}
+ 	}
++	return true;
++#endif
+ #endif
+ 	return true;
+ }
+diff --git a/src/common/orbis/atomicRef.h b/src/common/orbis/atomicRef.h
+new file mode 100644
+index 00000000..9f4227af
+--- /dev/null
++++ b/src/common/orbis/atomicRef.h
+@@ -0,0 +1,81 @@
++#ifndef KYTY_COMMON_ORBIS_ATOMIC_REF_H_
++#define KYTY_COMMON_ORBIS_ATOMIC_REF_H_
++
++// std::atomic_ref is C++20 but libc++ 18 (the newest one that builds with the PS4 toolchain here)
++// does not ship it. This is the subset KytyPS5 uses, built on the compiler's __atomic builtins.
++// Force-included for the Orbis build (-include), so it must not depend on any project header.
++
++#include <atomic>
++#include <cstddef>
++#include <type_traits>
++
++#if defined(__ORBIS__) && !defined(__cpp_lib_atomic_ref)
++namespace std { // NOLINT(cert-dcl58-cpp): polyfill for a missing standard class
++template <class T>
++class atomic_ref {
++public:
++	using value_type                        = T;
++	static constexpr bool is_always_lock_free = __atomic_always_lock_free(sizeof(T), 0);
++	static constexpr size_t required_alignment = sizeof(T) > alignof(T) ? sizeof(T) : alignof(T);
++
++	explicit atomic_ref(T& obj): m_ptr(&obj) {}
++	atomic_ref(const atomic_ref&) noexcept = default;
++	atomic_ref& operator=(const atomic_ref&) = delete;
++
++	T operator=(T desired) const noexcept { store(desired); return desired; }
++	operator T() const noexcept { return load(); }
++
++	bool is_lock_free() const noexcept { return __atomic_is_lock_free(sizeof(T), m_ptr); }
++
++	void store(T v, memory_order order = memory_order_seq_cst) const noexcept { __atomic_store(m_ptr, &v, static_cast<int>(order)); }
++	T load(memory_order order = memory_order_seq_cst) const noexcept
++	{
++		alignas(T) unsigned char buf[sizeof(T)];
++		__atomic_load(m_ptr, reinterpret_cast<T*>(buf), static_cast<int>(order));
++		return *reinterpret_cast<T*>(buf);
++	}
++	T exchange(T v, memory_order order = memory_order_seq_cst) const noexcept
++	{
++		alignas(T) unsigned char buf[sizeof(T)];
++		__atomic_exchange(m_ptr, &v, reinterpret_cast<T*>(buf), static_cast<int>(order));
++		return *reinterpret_cast<T*>(buf);
++	}
++	static constexpr memory_order FailureOrder(memory_order o) noexcept
++	{
++		return o == memory_order_acq_rel ? memory_order_acquire
++		       : o == memory_order_release ? memory_order_relaxed : o;
++	}
++	bool compare_exchange_weak(T& expected, T desired, memory_order success, memory_order failure) const noexcept
++	{
++		return __atomic_compare_exchange(m_ptr, &expected, &desired, true, static_cast<int>(success), static_cast<int>(failure));
++	}
++	bool compare_exchange_strong(T& expected, T desired, memory_order success, memory_order failure) const noexcept
++	{
++		return __atomic_compare_exchange(m_ptr, &expected, &desired, false, static_cast<int>(success), static_cast<int>(failure));
++	}
++	bool compare_exchange_weak(T& e, T d, memory_order s = memory_order_seq_cst) const noexcept
++	{ return compare_exchange_weak(e, d, s, FailureOrder(s)); }
++	bool compare_exchange_strong(T& e, T d, memory_order s = memory_order_seq_cst) const noexcept
++	{ return compare_exchange_strong(e, d, s, FailureOrder(s)); }
++
++	T fetch_add(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_add(m_ptr, v, static_cast<int>(order)); }
++	T fetch_sub(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_sub(m_ptr, v, static_cast<int>(order)); }
++	T fetch_and(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_and(m_ptr, v, static_cast<int>(order)); }
++	T fetch_or(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_or(m_ptr, v, static_cast<int>(order)); }
++	T fetch_xor(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_xor(m_ptr, v, static_cast<int>(order)); }
++	T operator++() const noexcept { return fetch_add(1) + 1; }
++	T operator++(int) const noexcept { return fetch_add(1); }
++	T operator--() const noexcept { return fetch_sub(1) - 1; }
++	T operator--(int) const noexcept { return fetch_sub(1); }
++	T operator+=(T v) const noexcept { return fetch_add(v) + v; }
++	T operator-=(T v) const noexcept { return fetch_sub(v) - v; }
++	T operator|=(T v) const noexcept { return fetch_or(v) | v; }
++	T operator&=(T v) const noexcept { return fetch_and(v) & v; }
++
++private:
++	T* m_ptr;
++};
++} // namespace std
++#endif
++
++#endif /* KYTY_COMMON_ORBIS_ATOMIC_REF_H_ */
+diff --git a/src/common/orbis/mcontext.h b/src/common/orbis/mcontext.h
+new file mode 100644
+index 00000000..649b5f91
+--- /dev/null
++++ b/src/common/orbis/mcontext.h
+@@ -0,0 +1,43 @@
++#ifndef KYTY_COMMON_ORBIS_MCONTEXT_H_
++#define KYTY_COMMON_ORBIS_MCONTEXT_H_
++
++// The PS4 libc only declares ucontext_t opaquely. The kernel exception handler (the only way faults
++// and thread-directed signals arrive on the PS4) is given a FreeBSD amd64 frame. The offsets below
++// are the ones measured on a PS4 Pro by the Orbis Eden port (docs/TECHNICAL.md, "JIT (dynarmic)"):
++// the mcontext starts at +64, rip at +160, rsp at +184 and the fault address at +136 inside it.
++
++#include <cstddef>
++#include <cstdint>
++
++#if defined(__ORBIS__)
++struct OrbisMContext {
++	int64_t  mc_onstack, mc_rdi, mc_rsi, mc_rdx, mc_rcx, mc_r8, mc_r9, mc_rax, mc_rbx, mc_rbp;
++	int64_t  mc_r10, mc_r11, mc_r12, mc_r13, mc_r14, mc_r15;
++	uint32_t mc_trapno;
++	uint16_t mc_fs, mc_gs;
++	int64_t  mc_addr;
++	uint32_t mc_flags;
++	uint16_t mc_es, mc_ds;
++	int64_t  mc_err, mc_rip, mc_cs, mc_rflags, mc_rsp, mc_ss;
++};
++struct OrbisUContext {
++	uint8_t       uc_header[64]; // measured on a PS4: the mcontext starts at offset 64
++	OrbisMContext uc_mcontext;
++};
++static_assert(offsetof(OrbisUContext, uc_mcontext) == 64);
++static_assert(offsetof(OrbisMContext, mc_addr) == 136 && offsetof(OrbisMContext, mc_rip) == 160 &&
++                  offsetof(OrbisMContext, mc_rsp) == 184,
++              "must match the offsets measured on the PS4");
++
++inline OrbisMContext* OrbisContext(const void* native_context) {
++	return &static_cast<OrbisUContext*>(const_cast<void*>(native_context))->uc_mcontext;
++}
++
++// Kernel exception handlers (signal number is the FreeBSD one: SEGV 11, BUS 10, ILL 4, USR1 30).
++extern "C" int sceKernelInstallExceptionHandler(int signal, void (*handler)(int, void*));
++extern "C" int sceKernelRemoveExceptionHandler(int signal);
++extern "C" int sceKernelRaiseException(void* pthread, int signal);
++inline constexpr int OrbisSignalGuestDispatch = 30; // FreeBSD SIGUSR1: what RaiseException delivers
++#endif
++
++#endif /* KYTY_COMMON_ORBIS_MCONTEXT_H_ */
+diff --git a/src/common/profiler.cpp b/src/common/profiler.cpp
+index ceca8fd9..6ac877f9 100644
+--- a/src/common/profiler.cpp
++++ b/src/common/profiler.cpp
+@@ -2,6 +2,14 @@
+ 
+ #include "common/emulatorConfig.h"
+ 
++#if defined(__ORBIS__)
++namespace Profiler {
++void SetThreadName(const char*) {}
++void Initialize() {}
++void Shutdown() {}
++} // namespace Profiler
++#else
++
+ #include <common/TracyProtocol.hpp>
+ #include <common/TracyVersion.hpp>
+ #include <cstdio>
+@@ -33,3 +41,5 @@ void Shutdown() {
+ }
+ 
+ } // namespace Profiler
++
++#endif // __ORBIS__
+diff --git a/src/common/profiler.h b/src/common/profiler.h
+index f07f22cd..749eca71 100644
+--- a/src/common/profiler.h
++++ b/src/common/profiler.h
+@@ -4,7 +4,9 @@
+ #include "common/common.h"
+ 
+ #include <cstdint>
++#if !defined(__ORBIS__)
+ #include <tracy/Tracy.hpp> // IWYU pragma: export
++#endif
+ 
+ namespace profiler::colors {
+ 
+@@ -35,6 +37,9 @@ struct Lifecycle {
+ 	KYTY_PROFILER_COLOR_OR_DEFAULT_IMPL(default_color __VA_OPT__(, ) __VA_ARGS__, default_color)
+ #define KYTY_PROFILER_COLOR_OR_DEFAULT_IMPL(default_color, color, ...) color
+ 
++#if defined(__ORBIS__)
++#define KYTY_PROFILER_BLOCK(name, ...) ((void)0)
++#else
+ #define KYTY_PROFILER_BLOCK(name, ...)                                                             \
+ 	KYTY_PROFILER_BLOCK_IMPL(__LINE__, name __VA_OPT__(, ) __VA_ARGS__)
+ #define KYTY_PROFILER_BLOCK_IMPL(line, name, ...)                                                  \
+@@ -46,6 +51,8 @@ struct Lifecycle {
+ 	    &KYTY_PROFILER_CONCAT(kyty_profiler_source_location_, line),                              \
+ 	    TRACY_CALLSTACK, tracy::ProfilerAvailable())
+ 
++#endif
++
+ #define KYTY_PROFILER_FUNCTION(...) KYTY_PROFILER_BLOCK(nullptr __VA_OPT__(, ) __VA_ARGS__)
+ 
+ #define KYTY_PROFILER_THREAD(name) Profiler::SetThreadName(name)
+diff --git a/src/kernel/memory.cpp b/src/kernel/memory.cpp
+index a9e401d9..699cc423 100644
+--- a/src/kernel/memory.cpp
++++ b/src/kernel/memory.cpp
+@@ -173,6 +173,10 @@ static uint64_t              g_test_backing_bytes_zeroed = 0;
+ static std::atomic<uint64_t> g_test_free_range_visits {0};
+ #endif
+ 
++#ifdef PAGE_SIZE
++#undef PAGE_SIZE // the PS4 libc defines it as a macro; the code below uses a constant of that name
++#endif
++
+ #include "memoryAddressSpace.inc"
+ 
+ enum class VirtualRangeType {
+diff --git a/src/kernel/memoryAddressSpace.inc b/src/kernel/memoryAddressSpace.inc
+index 4fb055e4..9296e6a0 100644
+--- a/src/kernel/memoryAddressSpace.inc
++++ b/src/kernel/memoryAddressSpace.inc
+@@ -93,7 +93,7 @@ public:
+ 			     static_cast<uint32_t>(GetLastError()));
+ 		}
+ #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__ORBIS__) // no memfd_create: a POSIX shm object backs the aliases
+ 		{
+ 			char shm_name[64];
+ 			snprintf(shm_name, sizeof(shm_name), "/kyty-dm-%d-%llx", static_cast<int>(getpid()),
+@@ -956,6 +956,9 @@ private:
+ 			}
+ 
+ 			const auto size = end - start;
++#ifndef MAP_NORESERVE
++#define MAP_NORESERVE 0 // FreeBSD/Orbis has no MAP_NORESERVE
++#endif
+ 			int        flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+ #if defined(KYTY_LINKED_GUEST_ADDRESS_SPACE)
+ 			flags |= MAP_FIXED;
+diff --git a/src/kernel/pthread.cpp b/src/kernel/pthread.cpp
+index 0e6dbfb6..aa9ee364 100644
+--- a/src/kernel/pthread.cpp
++++ b/src/kernel/pthread.cpp
+@@ -53,6 +53,7 @@
+ 
+ #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+ #include <csignal> // pthread_kill is declared here, not in <pthread.h>
++#include "common/orbis/mcontext.h"
+ #endif
+ 
+ #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS && (defined(_M_X64) || defined(__x86_64__))
+@@ -3093,7 +3094,11 @@ bool PthreadKillHost(Pthread thread, int host_signal) {
+ 		return false;
+ 	}
+ 
++#if defined(__ORBIS__)
++	return ::sceKernelRaiseException(reinterpret_cast<void*>(thread->p), host_signal) == 0;
++#else
+ 	return ::pthread_kill(thread->p, host_signal) == 0;
++#endif
+ }
+ #endif
+ 
+diff --git a/src/kernel/syncOnAddress.cpp b/src/kernel/syncOnAddress.cpp
+index a5b9fa0d..223e8e6a 100644
+--- a/src/kernel/syncOnAddress.cpp
++++ b/src/kernel/syncOnAddress.cpp
+@@ -12,7 +12,7 @@
+ #include <mutex>
+ #include <unordered_map>
+ 
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ #include <cerrno>
+ #include <linux/futex.h>
+ #include <sys/syscall.h>
+@@ -81,7 +81,7 @@ void PollSignals(signal_poll_func_t signal_poll) {
+ 	}
+ }
+ 
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ 
+ template <typename T>
+ int WaitLinux(volatile T* address, T expected, const WaitDeadline& deadline,
+@@ -261,7 +261,7 @@ int WaitImpl(volatile T* address, T expected, const WaitDeadline& deadline,
+ 	}
+ 
+ 	int result = OK;
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ 	result = WaitLinux(address, expected, deadline, signal_poll);
+ #else
+ 	result = WaitPortable(address, expected, deadline, signal_poll);
+@@ -292,7 +292,7 @@ int Wake(volatile void* address, int32_t count) {
+ 		return KERNEL_ERROR_EINVAL;
+ 	}
+ 
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ 	return WakeLinux(address, count);
+ #endif
+ 	return WakePortable(address, count);
+diff --git a/src/libs/libKernel.cpp b/src/libs/libKernel.cpp
+index 5081524d..4224d85e 100644
+--- a/src/libs/libKernel.cpp
++++ b/src/libs/libKernel.cpp
+@@ -50,6 +50,8 @@
+ #include <ucontext.h>
+ #endif
+ 
++#include "common/orbis/mcontext.h"
++
+ namespace Libs {
+ 
+ namespace LibC {
+@@ -865,6 +867,34 @@ static SignalUcontext CreateSignalUcontextFromHost(const ucontext_t* host_ctx) {
+ 	ctx.uc_mcontext.mc_fs     = static_cast<uint16_t>(ss.__fs & 0xffffu);
+ 	ctx.uc_mcontext.mc_len    = sizeof(SignalMcontext);
+ 
++	return ctx;
++#elif defined(__ORBIS__)
++	// The host frame already is FreeBSD amd64: copy field by field.
++	const auto* h = OrbisContext(host_ctx);
++
++	ctx.uc_mcontext.mc_rdi    = static_cast<uint64_t>(h->mc_rdi);
++	ctx.uc_mcontext.mc_rsi    = static_cast<uint64_t>(h->mc_rsi);
++	ctx.uc_mcontext.mc_rdx    = static_cast<uint64_t>(h->mc_rdx);
++	ctx.uc_mcontext.mc_rcx    = static_cast<uint64_t>(h->mc_rcx);
++	ctx.uc_mcontext.mc_r8     = static_cast<uint64_t>(h->mc_r8);
++	ctx.uc_mcontext.mc_r9     = static_cast<uint64_t>(h->mc_r9);
++	ctx.uc_mcontext.mc_rax    = static_cast<uint64_t>(h->mc_rax);
++	ctx.uc_mcontext.mc_rbx    = static_cast<uint64_t>(h->mc_rbx);
++	ctx.uc_mcontext.mc_rbp    = static_cast<uint64_t>(h->mc_rbp);
++	ctx.uc_mcontext.mc_r10    = static_cast<uint64_t>(h->mc_r10);
++	ctx.uc_mcontext.mc_r11    = static_cast<uint64_t>(h->mc_r11);
++	ctx.uc_mcontext.mc_r12    = static_cast<uint64_t>(h->mc_r12);
++	ctx.uc_mcontext.mc_r13    = static_cast<uint64_t>(h->mc_r13);
++	ctx.uc_mcontext.mc_r14    = static_cast<uint64_t>(h->mc_r14);
++	ctx.uc_mcontext.mc_r15    = static_cast<uint64_t>(h->mc_r15);
++	ctx.uc_mcontext.mc_rip    = static_cast<uint64_t>(h->mc_rip);
++	ctx.uc_mcontext.mc_rsp    = static_cast<uint64_t>(h->mc_rsp);
++	ctx.uc_mcontext.mc_rflags = static_cast<uint64_t>(h->mc_rflags);
++	ctx.uc_mcontext.mc_cs     = static_cast<uint64_t>(h->mc_cs) & 0xffffu;
++	ctx.uc_mcontext.mc_gs     = h->mc_gs;
++	ctx.uc_mcontext.mc_fs     = h->mc_fs;
++	ctx.uc_mcontext.mc_len    = sizeof(SignalMcontext);
++
+ 	return ctx;
+ #else
+ 	const auto* gregs = host_ctx->uc_mcontext.gregs;
+@@ -926,6 +956,28 @@ static void ApplySignalUcontextToHost(ucontext_t* dst_ctx, const SignalUcontext&
+ 	ss.__rsp    = src_ctx.uc_mcontext.mc_rsp;
+ 	ss.__rflags = src_ctx.uc_mcontext.mc_rflags;
+ 	// Segment selectors are left untouched; XNU validates them on sigreturn.
++#elif defined(__ORBIS__)
++	auto* h = OrbisContext(dst_ctx);
++
++	h->mc_rdi    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rdi);
++	h->mc_rsi    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rsi);
++	h->mc_rdx    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rdx);
++	h->mc_rcx    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rcx);
++	h->mc_r8     = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r8);
++	h->mc_r9     = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r9);
++	h->mc_rax    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rax);
++	h->mc_rbx    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rbx);
++	h->mc_rbp    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rbp);
++	h->mc_r10    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r10);
++	h->mc_r11    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r11);
++	h->mc_r12    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r12);
++	h->mc_r13    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r13);
++	h->mc_r14    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r14);
++	h->mc_r15    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_r15);
++	h->mc_rip    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rip);
++	h->mc_rsp    = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rsp);
++	h->mc_rflags = static_cast<int64_t>(src_ctx.uc_mcontext.mc_rflags);
++	// Segment selectors are left untouched, as on the other hosts.
+ #else
+ 	auto* gregs = dst_ctx->uc_mcontext.gregs;
+ 
+@@ -983,6 +1035,19 @@ static void HostSignalDispatchHandler(int /*host_signal*/, siginfo_t* /*info*/,
+ 	}
+ }
+ 
++#if defined(__ORBIS__)
++static void OrbisHostSignalDispatch(int host_signal, void* native_context) {
++	HostSignalDispatchHandler(host_signal, nullptr, native_context);
++}
++
++static bool EnsureHostSignalDispatchInstalled() {
++	static const bool installed = [] {
++		return ::sceKernelInstallExceptionHandler(Common::HostException::GuestSignalDispatchSignal(),
++		                                          OrbisHostSignalDispatch) == 0;
++	}();
++	return installed;
++}
++#else
+ static bool EnsureHostSignalDispatchInstalled() {
+ 	static const bool installed = [] {
+ 		struct sigaction action {};
+@@ -994,6 +1059,7 @@ static bool EnsureHostSignalDispatchInstalled() {
+ 	}();
+ 	return installed;
+ }
++#endif
+ 
+ #endif
+ 

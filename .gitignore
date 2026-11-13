@@ -1,0 +1,8 @@
+kyty-work/
+build-kyty/
+emufive-orbis/build-kyty/
+emufive-orbis/kyty-work/
+stage-kyty/
+out-kyty/
+*.log
+*.pkg

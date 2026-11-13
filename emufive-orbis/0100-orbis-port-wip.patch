@@ -1,0 +1,334 @@
+diff --git a/src/common/abi.h b/src/common/abi.h
+index 621ed610..4f0d3471 100644
+--- a/src/common/abi.h
++++ b/src/common/abi.h
+@@ -4,7 +4,13 @@
+ #include "common/common.h"
+ 
+ // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
++#if defined(__ORBIS__)
++// The PS4 target has no ms_abi. The only user (the guest TLS address stub) needs a callee that
++// preserves every register except rax, which no_caller_saved_registers provides.
++#define KYTY_MS_ABI __attribute__((no_caller_saved_registers))
++#else
+ #define KYTY_MS_ABI __attribute__((ms_abi))
++#endif
+ 
+ // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+ #define KYTY_SYSV_ABI __attribute__((sysv_abi))
+diff --git a/src/common/hostException.cpp b/src/common/hostException.cpp
+index 4e257611..f2e9c5e3 100644
+--- a/src/common/hostException.cpp
++++ b/src/common/hostException.cpp
+@@ -139,10 +139,34 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
+ 
+ #else
+ 
++#if defined(__ORBIS__)
++// The PS4 libc only declares ucontext_t opaquely; the kernel hands the handler a FreeBSD 9 amd64
++// frame, so the machine context is described here (sys/ucontext.h in FreeBSD 9).
++struct OrbisMContext {
++	int64_t  mc_onstack, mc_rdi, mc_rsi, mc_rdx, mc_rcx, mc_r8, mc_r9, mc_rax, mc_rbx, mc_rbp;
++	int64_t  mc_r10, mc_r11, mc_r12, mc_r13, mc_r14, mc_r15;
++	uint32_t mc_trapno;
++	uint16_t mc_fs, mc_gs;
++	int64_t  mc_addr;
++	uint32_t mc_flags;
++	uint16_t mc_es, mc_ds;
++	int64_t  mc_err, mc_rip, mc_cs, mc_rflags, mc_rsp, mc_ss;
++};
++struct OrbisUContext {
++	uint64_t      uc_sigmask[2];
++	OrbisMContext uc_mcontext;
++};
++static OrbisMContext* OrbisContext(const void* native_context) {
++	return &static_cast<OrbisUContext*>(const_cast<void*>(native_context))->uc_mcontext;
++}
++#endif
++
+ // x86-64 page-fault error code: bit 4 = instruction fetch, bit 1 = write, otherwise a read.
+ static AccessViolationType DecodeAccess(const ucontext_t* context) {
+ #if defined(__APPLE__)
+ 	const auto error = static_cast<uint64_t>(context->uc_mcontext->__es.__err);
++#elif defined(__ORBIS__)
++	const auto error = static_cast<uint64_t>(OrbisContext(context)->mc_err);
+ #else
+ 	const auto error = static_cast<uint64_t>(context->uc_mcontext.gregs[REG_ERR]);
+ #endif
+@@ -180,6 +204,25 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
+ 	info.r13               = registers.__r13;
+ 	info.r14               = registers.__r14;
+ 	info.r15               = registers.__r15;
++#elif defined(__ORBIS__)
++	const auto* registers  = OrbisContext(context);
++	info.exception_address = static_cast<uint64_t>(registers->mc_rip);
++	info.rax               = static_cast<uint64_t>(registers->mc_rax);
++	info.rbx               = static_cast<uint64_t>(registers->mc_rbx);
++	info.rcx               = static_cast<uint64_t>(registers->mc_rcx);
++	info.rdx               = static_cast<uint64_t>(registers->mc_rdx);
++	info.rsi               = static_cast<uint64_t>(registers->mc_rsi);
++	info.rdi               = static_cast<uint64_t>(registers->mc_rdi);
++	info.rbp               = static_cast<uint64_t>(registers->mc_rbp);
++	info.rsp               = static_cast<uint64_t>(registers->mc_rsp);
++	info.r8                = static_cast<uint64_t>(registers->mc_r8);
++	info.r9                = static_cast<uint64_t>(registers->mc_r9);
++	info.r10               = static_cast<uint64_t>(registers->mc_r10);
++	info.r11               = static_cast<uint64_t>(registers->mc_r11);
++	info.r12               = static_cast<uint64_t>(registers->mc_r12);
++	info.r13               = static_cast<uint64_t>(registers->mc_r13);
++	info.r14               = static_cast<uint64_t>(registers->mc_r14);
++	info.r15               = static_cast<uint64_t>(registers->mc_r15);
+ #else
+ 	const auto* registers  = context->uc_mcontext.gregs;
+ 	info.exception_address = static_cast<uint64_t>(registers[REG_RIP]);
+@@ -231,7 +274,11 @@ static bool InstallPlatformHandler() {
+ 	}
+ #else
+ 	struct sigaction action {};
++#if defined(__ORBIS__)
++	action.__sa_handler.__sa_sigaction = reinterpret_cast<void (*)(int, struct __siginfo*, void*)>(SignalHandler);
++#else
+ 	action.sa_sigaction = SignalHandler;
++#endif
+ 	sigemptyset(&action.sa_mask);
+ 	action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+ 	sigaddset(&action.sa_mask, GuestSignalDispatchSignal());
+diff --git a/src/common/orbis/atomicRef.h b/src/common/orbis/atomicRef.h
+new file mode 100644
+index 00000000..9f4227af
+--- /dev/null
++++ b/src/common/orbis/atomicRef.h
+@@ -0,0 +1,81 @@
++#ifndef KYTY_COMMON_ORBIS_ATOMIC_REF_H_
++#define KYTY_COMMON_ORBIS_ATOMIC_REF_H_
++
++// std::atomic_ref is C++20 but libc++ 18 (the newest one that builds with the PS4 toolchain here)
++// does not ship it. This is the subset KytyPS5 uses, built on the compiler's __atomic builtins.
++// Force-included for the Orbis build (-include), so it must not depend on any project header.
++
++#include <atomic>
++#include <cstddef>
++#include <type_traits>
++
++#if defined(__ORBIS__) && !defined(__cpp_lib_atomic_ref)
++namespace std { // NOLINT(cert-dcl58-cpp): polyfill for a missing standard class
++template <class T>
++class atomic_ref {
++public:
++	using value_type                        = T;
++	static constexpr bool is_always_lock_free = __atomic_always_lock_free(sizeof(T), 0);
++	static constexpr size_t required_alignment = sizeof(T) > alignof(T) ? sizeof(T) : alignof(T);
++
++	explicit atomic_ref(T& obj): m_ptr(&obj) {}
++	atomic_ref(const atomic_ref&) noexcept = default;
++	atomic_ref& operator=(const atomic_ref&) = delete;
++
++	T operator=(T desired) const noexcept { store(desired); return desired; }
++	operator T() const noexcept { return load(); }
++
++	bool is_lock_free() const noexcept { return __atomic_is_lock_free(sizeof(T), m_ptr); }
++
++	void store(T v, memory_order order = memory_order_seq_cst) const noexcept { __atomic_store(m_ptr, &v, static_cast<int>(order)); }
++	T load(memory_order order = memory_order_seq_cst) const noexcept
++	{
++		alignas(T) unsigned char buf[sizeof(T)];
++		__atomic_load(m_ptr, reinterpret_cast<T*>(buf), static_cast<int>(order));
++		return *reinterpret_cast<T*>(buf);
++	}
++	T exchange(T v, memory_order order = memory_order_seq_cst) const noexcept
++	{
++		alignas(T) unsigned char buf[sizeof(T)];
++		__atomic_exchange(m_ptr, &v, reinterpret_cast<T*>(buf), static_cast<int>(order));
++		return *reinterpret_cast<T*>(buf);
++	}
++	static constexpr memory_order FailureOrder(memory_order o) noexcept
++	{
++		return o == memory_order_acq_rel ? memory_order_acquire
++		       : o == memory_order_release ? memory_order_relaxed : o;
++	}
++	bool compare_exchange_weak(T& expected, T desired, memory_order success, memory_order failure) const noexcept
++	{
++		return __atomic_compare_exchange(m_ptr, &expected, &desired, true, static_cast<int>(success), static_cast<int>(failure));
++	}
++	bool compare_exchange_strong(T& expected, T desired, memory_order success, memory_order failure) const noexcept
++	{
++		return __atomic_compare_exchange(m_ptr, &expected, &desired, false, static_cast<int>(success), static_cast<int>(failure));
++	}
++	bool compare_exchange_weak(T& e, T d, memory_order s = memory_order_seq_cst) const noexcept
++	{ return compare_exchange_weak(e, d, s, FailureOrder(s)); }
++	bool compare_exchange_strong(T& e, T d, memory_order s = memory_order_seq_cst) const noexcept
++	{ return compare_exchange_strong(e, d, s, FailureOrder(s)); }
++
++	T fetch_add(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_add(m_ptr, v, static_cast<int>(order)); }
++	T fetch_sub(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_sub(m_ptr, v, static_cast<int>(order)); }
++	T fetch_and(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_and(m_ptr, v, static_cast<int>(order)); }
++	T fetch_or(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_or(m_ptr, v, static_cast<int>(order)); }
++	T fetch_xor(T v, memory_order order = memory_order_seq_cst) const noexcept { return __atomic_fetch_xor(m_ptr, v, static_cast<int>(order)); }
++	T operator++() const noexcept { return fetch_add(1) + 1; }
++	T operator++(int) const noexcept { return fetch_add(1); }
++	T operator--() const noexcept { return fetch_sub(1) - 1; }
++	T operator--(int) const noexcept { return fetch_sub(1); }
++	T operator+=(T v) const noexcept { return fetch_add(v) + v; }
++	T operator-=(T v) const noexcept { return fetch_sub(v) - v; }
++	T operator|=(T v) const noexcept { return fetch_or(v) | v; }
++	T operator&=(T v) const noexcept { return fetch_and(v) & v; }
++
++private:
++	T* m_ptr;
++};
++} // namespace std
++#endif
++
++#endif /* KYTY_COMMON_ORBIS_ATOMIC_REF_H_ */
+diff --git a/src/common/profiler.cpp b/src/common/profiler.cpp
+index ceca8fd9..6ac877f9 100644
+--- a/src/common/profiler.cpp
++++ b/src/common/profiler.cpp
+@@ -2,6 +2,14 @@
+ 
+ #include "common/emulatorConfig.h"
+ 
++#if defined(__ORBIS__)
++namespace Profiler {
++void SetThreadName(const char*) {}
++void Initialize() {}
++void Shutdown() {}
++} // namespace Profiler
++#else
++
+ #include <common/TracyProtocol.hpp>
+ #include <common/TracyVersion.hpp>
+ #include <cstdio>
+@@ -33,3 +41,5 @@ void Shutdown() {
+ }
+ 
+ } // namespace Profiler
++
++#endif // __ORBIS__
+diff --git a/src/common/profiler.h b/src/common/profiler.h
+index f07f22cd..749eca71 100644
+--- a/src/common/profiler.h
++++ b/src/common/profiler.h
+@@ -4,7 +4,9 @@
+ #include "common/common.h"
+ 
+ #include <cstdint>
++#if !defined(__ORBIS__)
+ #include <tracy/Tracy.hpp> // IWYU pragma: export
++#endif
+ 
+ namespace profiler::colors {
+ 
+@@ -35,6 +37,9 @@ struct Lifecycle {
+ 	KYTY_PROFILER_COLOR_OR_DEFAULT_IMPL(default_color __VA_OPT__(, ) __VA_ARGS__, default_color)
+ #define KYTY_PROFILER_COLOR_OR_DEFAULT_IMPL(default_color, color, ...) color
+ 
++#if defined(__ORBIS__)
++#define KYTY_PROFILER_BLOCK(name, ...) ((void)0)
++#else
+ #define KYTY_PROFILER_BLOCK(name, ...)                                                             \
+ 	KYTY_PROFILER_BLOCK_IMPL(__LINE__, name __VA_OPT__(, ) __VA_ARGS__)
+ #define KYTY_PROFILER_BLOCK_IMPL(line, name, ...)                                                  \
+@@ -46,6 +51,8 @@ struct Lifecycle {
+ 	    &KYTY_PROFILER_CONCAT(kyty_profiler_source_location_, line),                              \
+ 	    TRACY_CALLSTACK, tracy::ProfilerAvailable())
+ 
++#endif
++
+ #define KYTY_PROFILER_FUNCTION(...) KYTY_PROFILER_BLOCK(nullptr __VA_OPT__(, ) __VA_ARGS__)
+ 
+ #define KYTY_PROFILER_THREAD(name) Profiler::SetThreadName(name)
+diff --git a/src/kernel/memory.cpp b/src/kernel/memory.cpp
+index a9e401d9..699cc423 100644
+--- a/src/kernel/memory.cpp
++++ b/src/kernel/memory.cpp
+@@ -173,6 +173,10 @@ static uint64_t              g_test_backing_bytes_zeroed = 0;
+ static std::atomic<uint64_t> g_test_free_range_visits {0};
+ #endif
+ 
++#ifdef PAGE_SIZE
++#undef PAGE_SIZE // the PS4 libc defines it as a macro; the code below uses a constant of that name
++#endif
++
+ #include "memoryAddressSpace.inc"
+ 
+ enum class VirtualRangeType {
+diff --git a/src/kernel/memoryAddressSpace.inc b/src/kernel/memoryAddressSpace.inc
+index 4fb055e4..9296e6a0 100644
+--- a/src/kernel/memoryAddressSpace.inc
++++ b/src/kernel/memoryAddressSpace.inc
+@@ -93,7 +93,7 @@ public:
+ 			     static_cast<uint32_t>(GetLastError()));
+ 		}
+ #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__ORBIS__) // no memfd_create: a POSIX shm object backs the aliases
+ 		{
+ 			char shm_name[64];
+ 			snprintf(shm_name, sizeof(shm_name), "/kyty-dm-%d-%llx", static_cast<int>(getpid()),
+@@ -956,6 +956,9 @@ private:
+ 			}
+ 
+ 			const auto size = end - start;
++#ifndef MAP_NORESERVE
++#define MAP_NORESERVE 0 // FreeBSD/Orbis has no MAP_NORESERVE
++#endif
+ 			int        flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+ #if defined(KYTY_LINKED_GUEST_ADDRESS_SPACE)
+ 			flags |= MAP_FIXED;
+diff --git a/src/kernel/syncOnAddress.cpp b/src/kernel/syncOnAddress.cpp
+index a5b9fa0d..223e8e6a 100644
+--- a/src/kernel/syncOnAddress.cpp
++++ b/src/kernel/syncOnAddress.cpp
+@@ -12,7 +12,7 @@
+ #include <mutex>
+ #include <unordered_map>
+ 
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ #include <cerrno>
+ #include <linux/futex.h>
+ #include <sys/syscall.h>
+@@ -81,7 +81,7 @@ void PollSignals(signal_poll_func_t signal_poll) {
+ 	}
+ }
+ 
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ 
+ template <typename T>
+ int WaitLinux(volatile T* address, T expected, const WaitDeadline& deadline,
+@@ -261,7 +261,7 @@ int WaitImpl(volatile T* address, T expected, const WaitDeadline& deadline,
+ 	}
+ 
+ 	int result = OK;
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ 	result = WaitLinux(address, expected, deadline, signal_poll);
+ #else
+ 	result = WaitPortable(address, expected, deadline, signal_poll);
+@@ -292,7 +292,7 @@ int Wake(volatile void* address, int32_t count) {
+ 		return KERNEL_ERROR_EINVAL;
+ 	}
+ 
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__) && !defined(__ORBIS__)
+ 	return WakeLinux(address, count);
+ #endif
+ 	return WakePortable(address, count);
+diff --git a/src/libs/libKernel.cpp b/src/libs/libKernel.cpp
+index 5081524d..9ecd1e91 100644
+--- a/src/libs/libKernel.cpp
++++ b/src/libs/libKernel.cpp
+@@ -986,7 +986,11 @@ static void HostSignalDispatchHandler(int /*host_signal*/, siginfo_t* /*info*/,
+ static bool EnsureHostSignalDispatchInstalled() {
+ 	static const bool installed = [] {
+ 		struct sigaction action {};
++#if defined(__ORBIS__)
++		action.__sa_handler.__sa_sigaction = reinterpret_cast<void (*)(int, struct __siginfo*, void*)>(HostSignalDispatchHandler);
++#else
+ 		action.sa_sigaction = HostSignalDispatchHandler;
++#endif
+ 		sigemptyset(&action.sa_mask);
+ 		action.sa_flags = SA_SIGINFO | SA_RESTART;
+ 		const int signal_number = Common::HostException::GuestSignalDispatchSignal();

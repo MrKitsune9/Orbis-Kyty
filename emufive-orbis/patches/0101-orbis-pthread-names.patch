@@ -1,0 +1,61 @@
+--- a/src/common/platform/sysLinuxDbg.cpp
++++ b/src/common/platform/sysLinuxDbg.cpp
+@@ -8,6 +8,10 @@
+ 
+ #include <pthread.h>
+ 
++#if defined(__ORBIS__)
++extern "C" int pthread_attr_get_np(pthread_t, pthread_attr_t*);
++#endif
++
+ sys_dbg_stack_info_t SysStackUsage() {
+ 	sys_dbg_stack_info_t s {};
+ #if defined(__APPLE__)
+@@ -16,7 +20,12 @@
+ 	                  pthread_get_stacksize_np(self);
+ #else
+ 	pthread_attr_t attr {};
++#if defined(__ORBIS__) // FreeBSD name; the SDK has no pthread_getattr_np
++	pthread_attr_init(&attr);
++	if (::pthread_attr_get_np(pthread_self(), &attr) == 0) {
++#else
+ 	if (pthread_getattr_np(pthread_self(), &attr) == 0) {
++#endif
+ 		void*  stack_base = nullptr;
+ 		size_t stack_size = 0;
+ 		if (pthread_attr_getstack(&attr, &stack_base, &stack_size) == 0) {
+--- a/src/kernel/pthread.cpp
++++ b/src/kernel/pthread.cpp
+@@ -43,6 +43,10 @@
+ 
+ #include <pthread.h>
+ 
++#if defined(__ORBIS__)
++extern "C" int pthread_attr_get_np(pthread_t, pthread_attr_t*); // FreeBSD name for pthread_getattr_np
++#endif
++
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ #include <fmt/format.h>
+ #include <pthread_time.h>
+@@ -122,6 +126,8 @@
+ 	uint64_t tid = 0;
+ 	pthread_threadid_np(nullptr, &tid);
+ 	return tid;
++#elif defined(__ORBIS__)
++	return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pthread_self()));
+ #else
+ 	return static_cast<uint64_t>(::syscall(SYS_gettid));
+ #endif
+@@ -958,7 +964,12 @@
+ #else
+ 	// Record the main thread's stack bounds.
+ 	pthread_attr_t self_attr {};
++#if defined(__ORBIS__) // FreeBSD name; the SDK has no pthread_getattr_np
++	pthread_attr_init(&self_attr);
++	if (::pthread_attr_get_np(pthread_self(), &self_attr) == 0) {
++#else
+ 	if (pthread_getattr_np(pthread_self(), &self_attr) == 0) {
++#endif
+ 		void*  base = nullptr;
+ 		size_t size = 0;
+ 		if (pthread_attr_getstack(&self_attr, &base, &size) == 0 && base != nullptr && size != 0) {
