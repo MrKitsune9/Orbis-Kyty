@@ -28,7 +28,7 @@ for t in git cmake ninja; do command -v $t >/dev/null || die "nao achei '$t' no 
 [ -f "$EDEN/toolchain/eden-ps4.cmake" ] || die "nao achei toolchain/eden-ps4.cmake: o Eden nao esta em $EDEN (use EDEN=/caminho/repo-do-eden)"
 [ -d "$EDEN/libcxx18" ] || die "nao achei libcxx18/ (o libc++ 18 que o Eden compila)"
 [ -f "$EDEN/frontend/emutls/emutls.c" ] || die "nao achei frontend/emutls/emutls.c do Eden"
-# Os patches 0001-0007 do EmuFive vem junto neste pacote (patches/kytyps5/).
+# Os patches 0001-0033 (EmuFive 1.0.9) vem junto neste pacote (patches/kytyps5/).
 PATCHDIR="$PKG/patches/kytyps5"
 [ -d "$EMUFIVE/patches/kytyps5" ] && PATCHDIR="$EMUFIVE/patches/kytyps5"
 ls "$PATCHDIR"/0001*.patch >/dev/null 2>&1 || die "nao achei os patches do EmuFive em $PATCHDIR"
@@ -36,16 +36,20 @@ echo "patches: $PATCHDIR"
 mkdir -p "$WORK"; cd "$WORK"
 
 # 1) KytyPS5 no commit certo + submodulos
+# instalacao feita com patches antigos (antes do EmuFive 1.0.9): refaz a pasta do zero
+if [ -f kytyps5/.kyty-patched ] && [ ! -f kytyps5/.emufive-109 ]; then
+  echo "atualizando para EmuFive 1.0.9: refazendo kytyps5 (demora um pouco)"; rm -rf kytyps5
+fi
 if [ ! -d kytyps5/.git ]; then git clone --filter=blob:none https://github.com/KytyPS5/KytyPS5 kytyps5; fi
 if [ ! -f kytyps5/.kyty-patched ]; then
   git -C kytyps5 checkout -q $KYTY_SHA
   for m in fmt magic_enum spdlog nlohmann_json xxHash Vulkan-Headers VulkanMemoryAllocator SPIRV-Headers LibAtrac9 imgui tracy; do
     git -C kytyps5 submodule update --init "3rdparty/$m"
   done
-  for p in "$PATCHDIR"/000*.patch; do
+  for p in "$PATCHDIR"/00*.patch; do
     echo "aplicando $(basename "$p")"; git -C kytyps5 apply --whitespace=nowarn "$p"
   done
-  touch kytyps5/.kyty-patched
+  touch kytyps5/.kyty-patched kytyps5/.emufive-109
 fi
 # (instalacoes antigas ja tinham o 0100 aplicado)
 [ -f kytyps5/.orbis-applied ] || { [ -f kytyps5/.kyty-patched ] && [ -f kytyps5/src/common/orbis/mcontext.h ] && echo 0100-orbis-port.patch > kytyps5/.orbis-applied || true; }
