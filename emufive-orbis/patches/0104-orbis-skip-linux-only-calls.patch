@@ -1,0 +1,45 @@
+diff --git a/src/graphics/guest_gpu/graphicsRun.cpp b/src/graphics/guest_gpu/graphicsRun.cpp
+index 9340bb4f..dc68ace7 100644
+--- a/src/graphics/guest_gpu/graphicsRun.cpp
++++ b/src/graphics/guest_gpu/graphicsRun.cpp
+@@ -288,7 +288,7 @@ static void ForgetEarlyLabel(void* address, uint64_t value) {
+ // Writes guest memory without a page fault: false when the page is write-protected (cached
+ // or GPU-written data the caches track). A fault there must be handled on the GPU thread.
+ static bool TryWriteGuestNoFault(void* address, const void* value, uint64_t size) {
+-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
++#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__ORBIS__)
+ 	iovec local {const_cast<void*>(value), static_cast<size_t>(size)};
+ 	iovec remote {address, static_cast<size_t>(size)};
+ 	return process_vm_writev(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size);
+diff --git a/src/loader/x64InstructionEmulator.cpp b/src/loader/x64InstructionEmulator.cpp
+index 2cb843e9..2d737114 100644
+--- a/src/loader/x64InstructionEmulator.cpp
++++ b/src/loader/x64InstructionEmulator.cpp
+@@ -17,7 +17,9 @@
+ #include <sched.h>
+ #include <sys/ucontext.h>
+ #else
++#if !defined(__ORBIS__)
+ #include <asm/prctl.h>
++#endif
+ #include <sched.h>
+ #include <sys/syscall.h>
+ #include <ucontext.h>
+@@ -723,7 +725,7 @@ static uint64_t RandomNumber() {
+ 	uint64_t                     base = seed.load(std::memory_order_relaxed);
+ 	if (base == 0) {
+ 		uint64_t fresh = __rdtsc() ^ reinterpret_cast<uintptr_t>(&base);
+-#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS && !defined(__APPLE__)
++#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS && !defined(__APPLE__) && !defined(__ORBIS__)
+ 		uint64_t random = 0;
+ 		if (syscall(SYS_getrandom, &random, sizeof(random), 1 /* GRND_NONBLOCK */) == sizeof(random)) {
+ 			fresh ^= random;
+@@ -831,7 +833,7 @@ static bool TryEmulateCpuExtensions(Context& context) {
+ 		context.Gpr(0) = static_cast<uint32_t>(value);
+ 		context.Gpr(2) = static_cast<uint32_t>(value >> 32u);
+ 		SetCarryOnly(context, selector <= 1);
+-#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS && !defined(__APPLE__)
++#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS && !defined(__APPLE__) && !defined(__ORBIS__)
+ 	} else if ((instruction.mnemonic == ZYDIS_MNEMONIC_RDFSBASE ||
+ 	            instruction.mnemonic == ZYDIS_MNEMONIC_RDGSBASE) &&
+ 	           operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
